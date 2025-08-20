@@ -152,35 +152,106 @@ $('#kpi-year-profit').textContent  = fmtCHF(ytdProfit);
 }
 
 async function initCalendar(){
-  const calendarEl = $('#calendar');
+  const calendarEl = document.getElementById('calendar');
   calendarEl.innerHTML = ''; // reset
 
-  const evRes = await sb.from('events').select('*').order('start_at', {ascending:true}).limit(200);
+  // Events laden
+  const evRes = await sb.from('events').select('*').order('start_at', {ascending:true}).limit(500);
   if (evRes.error) { console.error(evRes.error); return; }
-  const events = (evRes.data||[]).map(e => ({
-    id: e.id,
-    title: e.title,
-    start: e.start_at,
-    end: e.end_at || undefined
-  }));
+
+  // Helper für ISO → FullCalendar braucht ISO-Strings
+  const toISO = (d) => (typeof d === 'string') ? d : new Date(d).toISOString();
 
   const calendar = new FullCalendar.Calendar(calendarEl, {
     initialView: 'dayGridMonth',
     height: 420,
-    events,
-    dateClick: async (info)=>{
+    selectable: true,          // ⬅️ Range mit Maus ziehen
+    selectMirror: true,
+    editable: true,            // ⬅️ Drag/Drop & Resize aktiv
+    dayMaxEvents: true,
+    plugins: [ FullCalendar.DayGrid, FullCalendar.TimeGrid, FullCalendar.Interaction ],
+    headerToolbar: {
+      left: 'prev,next today',
+      center: 'title',
+      right: 'dayGridMonth,timeGridWeek,timeGridDay'
+    },
+
+    // vorhandene Events
+    events: (evRes.data || []).map(e => ({
+      id: e.id,
+      title: e.title,
+      start: e.start_at,
+      end: e.end_at || undefined
+    })),
+
+    // Klick auf einen einzelnen Tag -> schnelles Einfügen 1h
+    dateClick: async (info) => {
       const title = prompt('Event-Titel?');
       if (!title) return;
-      const start_at = new Date(info.dateStr);
-      const end_at = new Date(start_at.getTime()+60*60*1000);
-      const insert = await sb.from('events').insert({ title, start_at: start_at.toISOString(), end_at: end_at.toISOString() }).select().single();
-      if (insert.error) { console.error(insert.error); toast('Event konnte nicht gespeichert werden'); return; }
-      toast('Event gespeichert');
-      initDashboard();
+      const start = new Date(info.dateStr);
+      const end = new Date(start.getTime() + 60*60*1000);
+      const ins = await sb.from('events').insert({
+        title,
+        start_at: toISO(start),
+        end_at: toISO(end)
+      }).select().single();
+      if (ins.error) { console.error(ins.error); alert('Event konnte nicht gespeichert werden'); return; }
+      calendar.addEvent({
+        id: ins.data.id, title, start: ins.data.start_at, end: ins.data.end_at
+      });
+    },
+
+    // Drag/Drop (verschieben)
+    eventDrop: async (info) => {
+      const up = await sb.from('events')
+        .update({ start_at: toISO(info.event.start), end_at: info.event.end ? toISO(info.event.end) : null })
+        .eq('id', info.event.id);
+      if (up.error) { console.error(up.error); alert('Update fehlgeschlagen'); info.revert(); }
+    },
+
+    // Resize (Dauer ändern)
+    eventResize: async (info) => {
+      const up = await sb.from('events')
+        .update({ start_at: toISO(info.event.start), end_at: info.event.end ? toISO(info.event.end) : null })
+        .eq('id', info.event.id);
+      if (up.error) { console.error(up.error); alert('Update fehlgeschlagen'); info.revert(); }
+    },
+
+    // Klick auf Event: Umbenennen oder Löschen
+    eventClick: async (info) => {
+      const choice = prompt('Titel ändern oder "DEL" eingeben zum Löschen:', info.event.title);
+      if (choice === null) return; // Abbruch
+      if (choice.trim().toUpperCase() === 'DEL') {
+        const del = await sb.from('events').delete().eq('id', info.event.id);
+        if (del.error) { console.error(del.error); alert('Löschen fehlgeschlagen'); return; }
+        info.event.remove();
+        return;
+      }
+      if (choice.trim() !== info.event.title) {
+        const up = await sb.from('events').update({ title: choice.trim() }).eq('id', info.event.id);
+        if (up.error) { console.error(up.error); alert('Update fehlgeschlagen'); return; }
+        info.event.setProp('title', choice.trim());
+      }
+    },
+
+    // Range-Selektion (z. B. Woche ziehen)
+    select: async (selectionInfo) => {
+      const title = prompt('Event-Titel (Range)?');
+      if (!title) { return calendar.unselect(); }
+      const ins = await sb.from('events').insert({
+        title,
+        start_at: toISO(selectionInfo.start),
+        end_at: selectionInfo.end ? toISO(selectionInfo.end) : null
+      }).select().single();
+      if (ins.error) { console.error(ins.error); alert('Event konnte nicht gespeichert werden'); return; }
+      calendar.addEvent({ id: ins.data.id, title, start: ins.data.start_at, end: ins.data.end_at });
+      calendar.unselect();
     }
   });
+
   calendar.render();
 }
+
 
 // --------- Einnahmen ---------
 async function loadIncomes(){
